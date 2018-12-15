@@ -237,6 +237,14 @@ let the buffer grow forever."
   :type '(choice (const :tag "Don't show confirmation prompt" nil)
                  (symbol :tag "Show confirmation prompt" 'confirm)))
 
+(defcustom eglot-spread-through-xref nil
+  "If non-nil, put anything reached through xref under originating server.
+This is handy if you tend to have one \"global\" or \"current\"
+project at any given time, and so don't mind nominally-common
+things (like system-installed libraries or header files) being
+considered part of one specific project."
+  :type 'boolean)
+
 ;; Customizable via `completion-category-overrides'.
 (when (assoc 'flex completion-styles-alist)
   (add-to-list 'completion-category-defaults '(eglot (styles flex basic))))
@@ -660,7 +668,12 @@ treated as in `eglot-dbind'."
     :accessor eglot--saved-initargs)
    (inferior-process
     :documentation "Server subprocess started automatically."
-    :accessor eglot--inferior-process))
+    :accessor eglot--inferior-process)
+   (xref-locations
+    :documentation
+    "List of non-editable directories also handled by server."
+    :initform (list)
+    :accessor eglot--xref-locations))
   :documentation
   "Represents a server. Wraps a process for LSP communication.")
 
@@ -777,7 +790,7 @@ be guessed."
            ((not guessed-mode)
             (eglot--error "Can't guess mode to manage for `%s'" (current-buffer)))
            (t guessed-mode)))
-         (project (or (project-current) `(transient . ,default-directory)))
+         (project (eglot--get-current-project))
          (lang-id-and-guess (eglot--lookup-mode guessed-mode))
          (language-id (car lang-id-and-guess))
          (guess (cdr lang-id-and-guess))
@@ -1512,6 +1525,27 @@ Use `eglot-managed-p' to determine if current buffer is managed.")
   "Return logical EGLOT server for current buffer, nil if none."
   eglot--cached-server)
 
+(defvar eglot--include-xref-locations nil
+  "Bound to the value of `eglot-spread-through-xref' around the call to `project-current' in `eglot--get-current-project'.")
+
+(defun eglot--get-current-project ()
+  (or (let ((eglot--include-xref-locations eglot-spread-through-xref))
+        (project-current))
+      `(transient . ,default-directory)))
+
+(defun eglot--project-try-xref-locations (dir)
+  "Probe `eglot--servers-by-project' for a server handling DIR."
+  (when eglot--include-xref-locations
+    (catch 'found
+      (maphash (lambda (project servers)
+                 (dolist (server servers)
+                   (when (member (expand-file-name dir)
+                                 (eglot--xref-locations server))
+                     (throw 'found project))))
+               eglot--servers-by-project))))
+
+(add-hook 'project-find-functions #'eglot--project-try-xref-locations t)
+
 (defun eglot--current-server-or-lose ()
   "Return current logical EGLOT server connection or error."
   (or eglot--cached-server
@@ -1537,8 +1571,7 @@ If it is activated, also signal textDocument/didOpen."
                 eglot--cached-server
                 (setq eglot--cached-server
                       (cl-find major-mode
-                               (gethash (or (project-current)
-                                            `(transient . ,default-directory))
+                               (gethash (eglot--get-current-project)
                                         eglot--servers-by-project)
                                :key #'eglot--major-mode))))
       (setq eglot--unreported-diagnostics `(:just-opened . nil))
@@ -2079,6 +2112,9 @@ Try to visit the target file for a richer summary line."
                  (start-pos (cl-getf start :character))
                  (end-pos (cl-getf (cl-getf range :end) :character)))
             (list name line start-pos (- end-pos start-pos)))))))
+    (cl-pushnew (expand-file-name (file-name-directory file))
+                (eglot--xref-locations (eglot--current-server-or-lose))
+                :test #'equal)
     (xref-make-match summary (xref-make-file-location file line column) length)))
 
 (cl-defmethod xref-backend-identifier-completion-table ((_backend (eql eglot)))
@@ -2939,7 +2975,7 @@ If INTERACTIVE, prompt user for details."
               ((string= system-type "darwin") "config_mac")
               ((string= system-type "windows-nt") "config_win")
               (t "config_linux"))))
-           (project (or (project-current) `(transient . ,default-directory)))
+           (project (eglot--get-current-project))
            (workspace
             (expand-file-name (md5 (project-root project))
                               (concat user-emacs-directory
