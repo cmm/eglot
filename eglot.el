@@ -2119,22 +2119,46 @@ encoding and Eglot will set this variable automatically.")
   ;; github#297)
   (goto-char (min (+ (eglot--bol) n) (line-end-position))))
 
+(cl-defstruct eglot--position-to-point-cache
+  line)
+(defvar eglot--position-to-point-cache nil)
+
 (defun eglot--lsp-position-to-point (pos-plist &optional marker)
   "Convert LSP position POS-PLIST to Emacs point.
 If optional MARKER, return a marker instead"
-  (eglot--widening
-   (goto-char (point-min))
-   (forward-line (min most-positive-fixnum
-                      (plist-get pos-plist :line)))
-   (unless (eobp) ;; if line was excessive leave point at eob
-     (let ((col (plist-get pos-plist :character)))
-       (unless (wholenump col)
-         (eglot--warn
-          "Caution: LSP server sent invalid character position %s. Using 0 instead."
-          col)
-         (setq col 0))
-       (funcall eglot-move-to-linepos-function col)))
-   (if marker (copy-marker (point-marker)) (point))))
+  (let ((cache eglot--position-to-point-cache)
+        (target-line (min most-positive-fixnum (plist-get pos-plist :line))))
+    (cl-labels ((point-or-marker ()
+                  (if marker (copy-marker (point-marker)) (point)))
+                (move-with-cache ()
+                  (let ((line-now (eglot--position-to-point-cache-line cache)))
+                    (if (null line-now)
+                        ;; first call, fall back on non-cached logic
+                        (move-sans-cache)
+                      (move (- target-line line-now)))))
+                (move-sans-cache ()
+                  (goto-char (point-min))
+                  (move target-line))
+                (move (line-offset)
+                  (let ((left (forward-line line-offset)))
+                    ;; if line movement was excessive leave the point be
+                    (when (zerop left)
+                      (let ((col (plist-get pos-plist :character)))
+                        (unless (wholenump col)
+                          (eglot--warn
+                           "Caution: LSP server sent invalid character position %s. Using 0 instead."
+                           col)
+                          (setq col 0))
+                        (funcall eglot-move-to-linepos-function col)))
+                    (when cache
+                      (setf (eglot--position-to-point-cache-line cache) (- target-line left))))))
+      (if cache
+          (progn
+            (move-with-cache)
+            (point-or-marker))
+        (eglot--widening
+         (move-sans-cache)
+         (point-or-marker))))))
 
 
 ;;; More helpers
@@ -4198,9 +4222,11 @@ Returns a list as described in docstring of `imenu--index-alist'."
                               :cancel-on-input non-essential))
          (head (and (cl-plusp (length res)) (elt res 0))))
     (when head
-      (eglot--dcase head
-        (((SymbolInformation)) (eglot--imenu-SymbolInformation res))
-        (((DocumentSymbol)) (eglot--imenu-DocumentSymbol res))))))
+      (eglot--widening
+       (let ((eglot--position-to-point-cache (make-eglot--position-to-point-cache)))
+         (eglot--dcase head
+           (((SymbolInformation)) (eglot--imenu-SymbolInformation res))
+           (((DocumentSymbol)) (eglot--imenu-DocumentSymbol res))))))))
 
 
 ;;; Code actions and rename
