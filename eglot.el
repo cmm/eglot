@@ -2123,6 +2123,10 @@ encoding and Eglot will set this variable automatically.")
   line)
 (defvar eglot--position-to-point-cache nil)
 
+(defun eglot--position-lessp (x y)
+  (or (< (plist-get x :line) (plist-get y :line))
+      (< (plist-get x :character) (plist-get y :character))))
+
 (defun eglot--lsp-position-to-point (pos-plist &optional marker)
   "Convert LSP position POS-PLIST to Emacs point.
 If optional MARKER, return a marker instead"
@@ -4193,7 +4197,13 @@ for which LSP on-type-formatting should be requested."
 
 (defun eglot--imenu-DocumentSymbol (res)
   "Compute `imenu--index-alist' for RES vector of DocumentSymbol."
-  (cl-labels ((dfs (&key name children range kind &allow-other-keys)
+  (cl-labels ((sorted (children)
+                (sort children
+                      :lessp #'eglot--position-lessp
+                      :key (lambda (c)
+                             (plist-get (plist-get c :range) :start))
+                      :in-place t))
+              (dfs (&key name children range kind &allow-other-keys)
                 (let* ((reg (eglot-range-region range))
                        (kind (alist-get kind eglot--symbol-kind-names))
                        (name (propertize name
@@ -4207,8 +4217,8 @@ for which LSP on-type-formatting should be requested."
                       (cons name (car reg))
                     ;; FIXME: leverage eglot--collecting-ranged
                     (cons name
-                            (mapcar (lambda (c) (apply #'dfs c)) children))))))
-    (mapcar (lambda (s) (apply #'dfs s)) res)))
+                            (mapcar (lambda (c) (apply #'dfs c)) (sorted children)))))))
+    (mapcar (lambda (s) (apply #'dfs s)) (sorted res))))
 
 (cl-defun eglot-imenu ()
   "Eglot's `imenu-create-index-function'.
