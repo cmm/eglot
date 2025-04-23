@@ -4145,25 +4145,32 @@ for which LSP on-type-formatting should be requested."
          (mapc #'delete-overlay eglot--highlights)
          (setq eglot--highlights nil)
          (eglot--when-buffer-window buf
-           ;; Don't highlight occurrences that aren't
-           ;; visible. (bug#80072).
-           (let* ((w (car (get-buffer-window-list)))
+           (let* ((eglot--position-to-point-cache (make-eglot--position-to-point-cache))
+                  (highlights (sort highlights
+                                    :lessp #'eglot--position-lessp
+                                    :key (lambda (hl)
+                                           (plist-get (plist-get hl :range) :start))
+                                    :in-place t))
+                  ;; Don't highlight occurrences that aren't
+                  ;; visible. (bug#80072).
+                  (w (car (get-buffer-window-list)))
                   (ws (window-start w)) (we (window-end w))
                   (ls (1- (line-number-at-pos ws t)))
                   (le (1- (line-number-at-pos we t))))
-             (mapc
-              (eglot--lambda ((DocumentHighlight) range)
-                (when-let* ((l (cl-getf (cl-getf range :start) :line))
-                            (_ (and (>= l ls) (<= l le))))
-                  (pcase-let ((`(,beg . ,end)
-                               (eglot-range-region range)))
-                    (let ((ov (make-overlay beg end)))
-                      (overlay-put ov 'face 'eglot-highlight-symbol-face)
-                      (overlay-put ov 'eglot--overlay t)
-                      (overlay-put ov 'modification-hooks
-                                   `(,(lambda (o &rest _) (delete-overlay o))))
-                      (push ov eglot--highlights)))))
-              highlights))))
+             (eglot--widening
+              (mapc
+               (eglot--lambda ((DocumentHighlight) range)
+                 (when-let* ((l (cl-getf (cl-getf range :start) :line))
+                             (_ (and (>= l ls) (<= l le))))
+                   (pcase-let ((`(,beg . ,end)
+                                (eglot-range-region range)))
+                     (let ((ov (make-overlay beg end)))
+                       (overlay-put ov 'face 'eglot-highlight-symbol-face)
+                       (overlay-put ov 'eglot--overlay t)
+                       (overlay-put ov 'modification-hooks
+                                    `(,(lambda (o &rest _) (delete-overlay o))))
+                       (push ov eglot--highlights)))))
+               highlights)))))
        :hint :textDocument/documentHighlight)
       nil)))
 
@@ -4177,10 +4184,14 @@ for which LSP on-type-formatting should be requested."
       (alist-get kind eglot--symbol-kind-names "Unknown")
       (mapcan
        (pcase-lambda (`(,container . ,objs))
-         (let ((elems
-                (eglot--collecting-ranged
-                    (s reg objs (lambda (o)
-                                  (plist-get :range (plist-get o :location))))
+         (let* ((objs (sort objs
+                            :key (lambda (obj)
+                                   (plist-get (plist-get (plist-get obj :location) :range) :start))
+                            :lessp #'eglot--position-lessp))
+                (elems
+                 (eglot--collecting-ranged
+                  (s reg objs (lambda (o)
+                                (plist-get :range (plist-get o :location))))
                   (eglot--dbind ((SymbolInformation) kind name) s
                     (let ((kind (alist-get kind eglot--symbol-kind-names)))
                       (cons (propertize name
@@ -4893,20 +4904,25 @@ If NOERROR, return predicate, else erroring function."
      :success-fn (lambda (hints)
                    (eglot--when-live-buffer buf
                      (eglot--widening
-                      ;; Overlays ending right at FROM with an
-                      ;; `after-string' property logically belong to
-                      ;; the (FROM TO) region.  Likewise, such
-                      ;; overlays ending at TO don't logically belong
-                      ;; to it.
-                      (dolist (o (overlays-in (1- from) to))
-                        (when (and (overlay-get o 'eglot--inlay-hint)
-                                   (cond ((eq (overlay-end o) from)
-                                          (overlay-get o 'after-string))
-                                         ((eq (overlay-end o) to)
-                                          (overlay-get o 'before-string))
-                                         (t)))
-                          (delete-overlay o)))
-                      (mapc paint-hint hints))))
+                      (let ((eglot--position-to-point-cache (make-eglot--position-to-point-cache))
+                            (hints (sort hints
+                                         :lessp #'eglot--position-lessp
+                                         :key (lambda (hint) (plist-get hint :position))
+                                         :in-place t)))
+                        ;; Overlays ending right at FROM with an
+                        ;; `after-string' property logically belong to
+                        ;; the (FROM TO) region.  Likewise, such
+                        ;; overlays ending at TO don't logically belong
+                        ;; to it.
+                        (dolist (o (overlays-in (1- from) to))
+                          (when (and (overlay-get o 'eglot--inlay-hint)
+                                     (cond ((eq (overlay-end o) from)
+                                            (overlay-get o 'after-string))
+                                           ((eq (overlay-end o) to)
+                                            (overlay-get o 'before-string))
+                                           (t)))
+                            (delete-overlay o)))
+                        (mapc paint-hint hints)))))
      :deferred 'eglot--update-hints-1)))
 
 (define-minor-mode eglot-inlay-hints-mode
